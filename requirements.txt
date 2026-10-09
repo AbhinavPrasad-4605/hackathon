@@ -1,5 +1,0 @@
-fastapi
-uvicorn
-cryptography
-scikit-learn
-numpy
