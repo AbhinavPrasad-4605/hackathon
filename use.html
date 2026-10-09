@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use a DemoSoft key</title>
+<style>
+  :root { --bg:#eef0f7; --panel:#fff; --ink:#14183a; --muted:#5b6082; --line:#d3d7ea; --accent:#3b3fd8; --on:#fff;
+          --green:#1f9d55; --yellow:#b27800; --red:#c8312b; --greenbg:#e8f8ef; --yellowbg:#fff6df; --redbg:#fdebea; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0e1024; --panel:#171a38; --ink:#e8eaff; --muted:#9a9fc8; --line:#2b2f57; --accent:#8e92ff; --on:#0e1024;
+          --greenbg:#11321f; --yellowbg:#3a2c08; --redbg:#3a1414; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 "Segoe UI", system-ui, sans-serif; }
+  header { background:var(--panel); border-bottom:1px solid var(--line); padding:14px 20px; }
+  header b { font-size:19px; } header span { color:var(--muted); font-size:14px; display:block; margin-top:2px; }
+  main { max-width:620px; margin:0 auto; padding:24px 20px 60px; display:grid; gap:18px; }
+  h1 { font-size:24px; margin:0 0 6px; } h2 { font-size:16px; margin:0 0 10px; }
+  p { margin:0 0 10px; } .muted { color:var(--muted); font-size:14px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:20px; }
+  label { display:block; color:var(--muted); font-size:14px; margin:12px 0 4px; }
+  input, select { width:100%; padding:10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit; }
+  button { padding:10px 16px; border:1px solid var(--accent); background:var(--accent); color:var(--on); border-radius:6px; font:inherit; font-weight:600; cursor:pointer; }
+  button.alt { background:transparent; color:var(--ink); border-color:var(--line); font-weight:400; }
+  button:disabled { opacity:.5; cursor:wait; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--yellow); outline-offset:2px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+  details { margin-top:10px; } summary { color:var(--muted); font-size:13px; cursor:pointer; }
+  .err { color:var(--red); min-height:22px; margin-top:10px; font-size:14px; }
+  .verdict { border-radius:8px; padding:16px 18px; margin-top:4px; }
+  .verdict.green { background:var(--greenbg); border:2px solid var(--green); }
+  .verdict.yellow { background:var(--yellowbg); border:2px solid var(--yellow); }
+  .verdict.red { background:var(--redbg); border:2px solid var(--red); }
+  .vtitle { font-weight:700; font-size:17px; display:flex; align-items:center; gap:8px; }
+  .vtitle .dot { width:10px; height:10px; border-radius:50%; display:inline-block; }
+  .green .dot { background:var(--green); } .yellow .dot { background:var(--yellow); } .red .dot { background:var(--red); }
+  .vreasons { margin:10px 0 0; padding-left:20px; font-size:14px; }
+  .vreasons li { margin:3px 0; }
+  .meta { font-size:13px; color:var(--muted); margin-top:10px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<header><b>DemoSoft</b><span>Use a key you were given</span></header>
+<main>
+  <section>
+    <h1>Request access with a product key</h1>
+    <p class="muted">If a teammate or friend bought DemoSoft and shared their key with you, enter it below along with a name for your device. The license owner decides how many devices a key can have — your request is checked automatically and, if a human needs to approve it, it will wait for them.</p>
+    <form id="useForm">
+      <label for="pkey">Product key</label>
+      <input id="pkey" placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX" autocomplete="off" required>
+      <label for="dname">Your name or device</label>
+      <input id="dname" placeholder="e.g. Priya's Laptop" autocomplete="off" required>
+      <label for="country">Your location <span class="muted">(for this demo, pick where you're "connecting from")</span></label>
+      <select id="country"></select>
+      <details>
+        <summary>Advanced: server address</summary>
+        <label for="server">License server URL</label>
+        <input id="server">
+      </details>
+      <div class="row"><button id="go" type="submit">Request to use this key</button></div>
+      <div class="err" id="useErr" role="alert"></div>
+    </form>
+  </section>
+
+  <section id="result" hidden>
+    <h2>Result</h2>
+    <div id="verdict" class="verdict">
+      <div class="vtitle"><span class="dot"></span><span id="vheadline"></span></div>
+      <p id="vwhy" style="margin:8px 0 0"></p>
+      <ul class="vreasons" id="vreasons"></ul>
+      <p class="meta" id="vmeta"></p>
+    </div>
+    <div class="row">
+      <button id="recheck" class="alt" type="button">Check status again</button>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const COUNTRIES = ["IN","US","DE","BR","JP","AU","GB","RU"];
+COUNTRIES.forEach(c => $("country").add(new Option(c, c)));
+$("server").value = location.protocol.startsWith("http") ? location.origin : "http://localhost:8000";
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+const tokKey = (key, dev) => "useTok:" + key + ":" + dev;
+
+function render(r) {
+  $("result").hidden = false;
+  const v = $("verdict"); v.className = "verdict " + r.verdict;
+  const headline = r.status === "ok" ? "You're in — this device is approved"
+    : r.status === "pending" ? "Waiting for the owner's approval"
+    : r.status === "denied" ? "The owner declined this device"
+    : r.status === "full" ? "No device slots left on this plan"
+    : r.status === "flood" ? "Too many requests waiting right now"
+    : r.status === "badtoken" ? "Couldn't verify this device"
+    : r.allowed === false ? "Request blocked" : "Request sent";
+  $("vheadline").textContent = headline;
+  $("vwhy").textContent = (r.reasons && r.reasons[0]) || "";
+  $("vreasons").innerHTML = (r.reasons || []).slice(1).map(x => `<li>${esc(x)}</li>`).join("")
+    || (r.reasons && r.reasons.length ? "" : "<li>No unusual signals detected for this request.</li>");
+  const lic = r.license || {};
+  $("vmeta").textContent = lic.product ? `${lic.product} (${lic.tier}) — plan allows ${lic.max_devices} device${lic.max_devices === 1 ? "" : "s"} — risk score ${r.risk}/100` : "";
+}
+
+async function verify() {
+  const key = $("pkey").value.trim(), device = $("dname").value.trim(), country = $("country").value;
+  $("useErr").textContent = "";
+  if (!key || !device) { $("useErr").textContent = "Enter both the product key and a name for your device."; return; }
+  const token = (() => { try { return localStorage.getItem(tokKey(key, device)) || ""; } catch (e) { return ""; } })();
+  $("go").disabled = true; $("recheck").disabled = true;
+  try {
+    const r = await fetch($("server").value.replace(/\/$/, "") + "/api/verify", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, device, country, token })
+    }).then(r => r.json());
+    if (r.device_token) { try { localStorage.setItem(tokKey(key, device), r.device_token); } catch (e) {} }
+    render(r);
+  } catch (e) {
+    $("useErr").textContent = "Couldn't reach the server: " + e.message;
+  } finally {
+    $("go").disabled = false; $("recheck").disabled = false;
+  }
+}
+
+$("useForm").onsubmit = e => { e.preventDefault(); verify(); };
+$("recheck").onclick = verify;
+</script>
+</body>
+</html>
