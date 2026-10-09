@@ -78,7 +78,7 @@
     </section>
     <section>
       <h2>Devices on your keys</h2>
-      <p class="muted">A device that is not approved here cannot use your key. Requests are sorted by how suspicious they look, scored automatically.</p>
+      <p class="muted">A device that is not approved here cannot use your key. Requests are analyzed in real time for fraud, impossible travel, and automated abuse.</p>
       <div class="row"><button id="denySus" class="alt" hidden>Deny everything flagged suspicious</button></div>
       <div id="devices"><p class="muted">Buy a plan to manage devices.</p></div>
       <div class="err" id="devErr" role="alert"></div>
@@ -86,7 +86,7 @@
     <section>
       <h2>Your licenses</h2>
       <div class="wrap"><table>
-        <thead><tr><th>Key</th><th>Plan</th><th>Devices used</th><th>Valid until</th><th>Status</th></tr></thead>
+        <thead><tr><th>Key</th><th>Plan</th><th>Trust Score</th><th>Devices used</th><th>Valid until</th><th>Status</th></tr></thead>
         <tbody id="mine"></tbody>
       </table></div>
     </section>
@@ -136,9 +136,11 @@ async function loadMine() {
     const rows = await api("/api/my-licenses");
     $("mine").innerHTML = rows.map(l => {
       const v = l.revoked ? "red" : l.verdict;
-      return `<tr><td><code>${l.key}</code></td><td>${esc(l.product)}</td><td>${l.slots_used} of ${l.max_devices}</td>
-        <td>${new Date(l.expires * 1000).toLocaleDateString()}</td><td class="${v}">${l.revoked ? "Revoked" : status[l.verdict]}</td></tr>`;
-    }).join("") || `<tr><td colspan="5" class="muted">You have no licenses yet. Choose a plan above.</td></tr>`;
+      const trust = l.trust_score !== undefined ? l.trust_score : (l.revoked ? 0 : 100);
+      const stText = l.revoked ? (l.auto_revoked ? "Revoked (Risk > 85)" : "Revoked by Dev") : status[l.verdict];
+      return `<tr><td><code>${l.key}</code></td><td>${esc(l.product)}</td><td><b>${trust}/100</b></td><td>${l.slots_used} of ${l.max_devices}</td>
+        <td>${new Date(l.expires * 1000).toLocaleDateString()}</td><td class="${v}">${stText}</td></tr>`;
+    }).join("") || `<tr><td colspan="6" class="muted">You have no licenses yet. Choose a plan above.</td></tr>`;
     const waiting = rows.reduce((n, l) => n + l.pending.length, 0);
     $("alert").hidden = !waiting;
     $("alert").textContent = waiting ? `${waiting} new device${waiting > 1 ? "s are" : " is"} asking to use your key. Review below and approve only devices you recognise.` : "";
