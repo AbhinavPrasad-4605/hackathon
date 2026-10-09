@@ -57,6 +57,7 @@
       <div class="row"><button id="guess" class="alt">Guess 12 random keys</button></div>
       <div class="row"><button id="imp" class="alt">Pretend to be an approved device</button></div>
       <div class="row"><button id="flood">Flood the approval queue</button></div>
+      <div class="row"><button id="canaryBtn" class="alt" style="border-color:var(--hot); color:var(--hot);">Activate leaked pastebin key (Canary)</button></div>
       <p class="hint">Sends 5 fake devices in under two seconds, to jam the owner's approval list.</p>
       <p class="hint">Without the server's secret, an attacker cannot produce a valid check code, so these fail. After 10 bad keys in a minute the server blocks the address.</p>
     </section>
@@ -132,6 +133,18 @@ $("imp").onclick = () => { const k = getKey(); if (!k) return;
 $("flood").onclick = () => { const k = getKey(); if (!k) return; busy(async () => {
   log("Flooding the approval queue with 5 fake devices...", "dim");
   for (let i = 0; i < 5; i++) { await activate(k, "junk-" + dev(), "US"); await sleep(300); } }); };
+$("canaryBtn").onclick = () => busy(async () => {
+  log("Fetching active honeypot decoy key from public leak simulation...", "dim");
+  try {
+    const data = await fetch($("server").value.replace(/\/$/, "") + "/api/honeypot-telemetry").then(r => r.json());
+    const targetKey = data.traps && data.traps[0] ? data.traps[0].key : randKey();
+    $("key").value = targetKey;
+    log("Attempting activation with decoy canary key: " + targetKey, "warn");
+    await activate(targetKey, "adversary-" + dev(), $("country").value);
+  } catch (e) {
+    log("Canary fetch error: " + e.message, "bad");
+  }
+});
 $("clear").onclick = () => { $("log").innerHTML = ""; acc = ref = 0; $("sAcc").textContent = $("sRef").textContent = 0; $("sRisk").textContent = "--"; };
 </script>
 </body>
