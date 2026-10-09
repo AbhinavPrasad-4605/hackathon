@@ -63,9 +63,10 @@ The developer console mid-attack: the risk score climbs from green to red as sim
 ## 9. Team Contributions
 | Member Name | Contribution |
 |-------------|--------------|
-| [Name 1] | [Work completed] |
-| [Name 2] | [Work completed] |
-| [Name 3] | [Work completed] |
+| Abhinav Prasad | Server Module |
+| Yadhavkrishna K S | Client Module, Frontend |
+| Muhammed Nazim M K | Backend |
+| Rohith P Menon | Attacker Module |
 
 ## 10. Tools Used
 | Tool / Platform | Purpose / Why Used |
