@@ -68,11 +68,26 @@
 
   <div class="stack">
     <section>
-      <div id="stamp"><div class="score" id="score">--</div><div><div class="label" id="label">No license selected</div><div id="meta" class="meta"></div></div></div>
+      <div id="stamp">
+        <div>
+          <div style="font-size:12px; font-weight:700; text-transform:uppercase; color:var(--muted); letter-spacing:0.04em;">Trust Score</div>
+          <div class="score" id="score">--</div>
+        </div>
+        <div>
+          <div class="label" id="label">No license selected</div>
+          <div id="meta" class="meta"></div>
+        </div>
+      </div>
       <div class="stats" id="stats"></div>
+      <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-top:12px;">
+        <span>Anomaly risk: <b id="riskLabel">0%</b></span>
+        <span>Automatic revocation threshold: <b>&gt; 85% risk</b></span>
+      </div>
       <div class="bar" id="barwrap"><i id="bar"></i></div>
-      <ul id="reasons"></ul>
-      <div class="row"><button id="revoke" class="danger" disabled>Revoke license</button></div>
+      <div class="row">
+        <button id="revoke" class="danger" disabled>Revoke license</button>
+        <button id="unrevoke" class="alt" style="border-color:var(--green); color:var(--green); font-weight:600;" disabled>Reactivate license</button>
+      </div>
     </section>
     <section>
       <h2>Activation map</h2>
@@ -81,6 +96,63 @@
     <section>
       <h2>Recent activations</h2>
       <table><thead><tr><th>Time</th><th>Device</th><th>Country</th><th>Result</th></tr></thead><tbody id="acts"></tbody></table>
+    </section>
+  </div>
+
+  <!-- Threat Intelligence Audit Log + Policy Controls (spans full width) -->
+  <div style="grid-column:1/-1">
+    <section>
+      <h2>Threat intelligence audit log &amp; access overrides</h2>
+      <p class="meta">Every access request evaluated by the threat detection engine is logged below. Administrators can selectively override automated decisions per device.</p>
+      <div class="row" style="margin-bottom:12px">
+        <button id="refreshAudit" class="alt">Refresh log</button>
+        <button id="filterBlocked" class="danger">Filter: Blocked requests (<span id="blockCount">0</span>)</button>
+        <button id="showOverrides" class="alt">Active overrides (<span id="overrideCount">0</span>)</button>
+      </div>
+      <div id="overridesList" hidden style="margin-bottom:14px; padding:12px; background:var(--bg); border-radius:6px; border:1px solid var(--line)">
+        <b>Active manual overrides:</b>
+        <div id="overridesBody" style="margin-top:8px"></div>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr>
+            <th>Time</th><th>Device</th><th>Country</th><th>IP</th>
+            <th>AI Verdict</th><th>Threat</th><th>Attack Type</th>
+            <th>Final</th><th>Override</th><th>Actions</th>
+          </tr></thead>
+          <tbody id="auditBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- Active Cyber Deception & Canary Traps (spans full width) -->
+  <div style="grid-column:1/-1">
+    <section>
+      <h2>Active cyber deception &amp; canary honeypots</h2>
+      <p class="meta">Proactively bait attackers with decoy keys planted in leaked pastebins and fake repositories. When an adversary attempts activation, their signature is flagged and counter-surveillance telemetry is logged.</p>
+      <div class="row" style="margin-bottom:12px; align-items:center;">
+        <input id="canaryLabel" placeholder="Canary label, e.g. pastebin-leak-2026" style="max-width:280px;">
+        <button id="spawnCanary" class="alt">Deploy new canary trap</button>
+        <button id="refreshHoneypot" class="alt">Refresh honeypot telemetry</button>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 2fr; gap:14px;">
+        <div>
+          <b>Active canary keys (<span id="canaryCount">0</span>)</b>
+          <div id="canaryList" style="margin-top:8px; font-size:13px; max-height:220px; overflow-y:auto;"></div>
+        </div>
+        <div>
+          <b>Captured adversary telemetry (<span id="trapHits">0</span>)</b>
+          <div style="overflow-x:auto; margin-top:8px;">
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Signature</th><th>Canary Label</th><th>IP</th><th>Device</th><th>Action</th>
+              </tr></thead>
+              <tbody id="honeypotBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 </main>
@@ -103,28 +175,33 @@ function drawMap(acts, by = {}) {
 }
 function render(r) {
   const v = r.verdict, l = r.license;
+  const trust = r.trust_score !== undefined ? r.trust_score : (100 - r.risk);
   $("stamp").className = v; $("stamp").style.color = "";
   $("barwrap").className = "bar " + v;
-  $("score").textContent = r.risk; $("score").className = "score " + v;
-  $("label").textContent = names[v] + (r.revoked ? " (revoked)" : "");
+  $("score").textContent = trust; $("score").className = "score " + v;
+  $("label").innerHTML = names[v] + (r.revoked ? ` <span style="color:var(--red)">(REVOKED${r.auto_revoked ? ": Risk > 85" : ""})</span>` : "");
   $("bar").style.width = r.risk + "%";
-  $("meta").textContent = `${l.key} | ${l.product} (${l.tier}) | owner: ${l.owner || "issued by hand"} | ${r.slots_used} of ${l.max_devices} device slots used`;
-  $("reasons").innerHTML = (r.reasons.length ? r.reasons : ["No suspicious behaviour found."]).map(x => `<li>${x}</li>`).join("");
+  $("riskLabel").textContent = r.risk + "%";
+  $("meta").innerHTML = `<b>Trust: ${trust}/100</b> | Risk: ${r.risk}%<br>${l.key} | ${l.product} (${l.tier}) | owner: ${esc(l.owner || "issued by hand")} | ${r.slots_used} of ${l.max_devices} slots`;
+  $("reasons").innerHTML = (r.reasons.length ? r.reasons : ["No suspicious behaviour found."]).map(x => `<li>${esc(x)}</li>`).join("");
   $("revoke").disabled = r.revoked;
+  $("unrevoke").disabled = !r.revoked;
   const acts = r.activations || [];
   drawMap(acts, r.by_country);
-  $("stats").innerHTML = `<div><b>${r.total_acts}</b><span>Attempts</span></div><div><b>${r.refused}</b><span>Refused</span></div><div><b>${r.devices_seen} / ${l.max_devices}</b><span>Devices seen / allowed</span></div><div><b>${Object.keys(r.by_country).length}</b><span>Countries</span></div><div><b>${new Date().toLocaleTimeString()}</b><span>Last refreshed</span></div>`;
+  $("stats").innerHTML = `<div><b>${trust} / 100</b><span>Trust Score</span></div><div><b>${r.risk}%</b><span>Anomaly Risk</span></div><div><b>${r.total_acts}</b><span>Total Requests</span></div><div><b>${r.refused}</b><span>Refused / Denied</span></div><div><b>${r.devices_seen} / ${l.max_devices}</b><span>Devices</span></div><div><b>${Object.keys(r.by_country).length}</b><span>Countries</span></div><div><b>${new Date().toLocaleTimeString()}</b><span>Refreshed</span></div>`;
   $("acts").innerHTML = acts.slice(-12).reverse().map(a =>
-    `<tr><td>${new Date(a.ts * 1000).toLocaleTimeString()}</td><td>${a.device}</td><td>${a.country}</td><td>${a.allowed ? "Allowed" : "Refused"}</td></tr>`).join("")
+    `<tr><td>${new Date(a.ts * 1000).toLocaleTimeString()}</td><td>${esc(a.device)}</td><td>${a.country}</td><td>${a.allowed ? "Allowed" : "Refused"}</td></tr>`).join("")
     || `<tr><td colspan="4" class="empty">No activations yet.</td></tr>`;
 }
 async function refresh() {
   try {
     const list = await fetch("/api/licenses").then(r => r.json());
-    if (list.length) $("list").innerHTML = list.slice().reverse().map(x =>
-      `<div class="lic" tabindex="0" role="button" data-id="${x.id}" aria-current="${x.id === sel}">
-         <div>${x.id}<small>${esc(x.product)} | ${esc(x.owner || "by hand")} | ${x.activations} activations${x.revoked ? " | revoked" : ""}</small></div>
-         <span class="pill ${x.verdict}">${x.risk}</span></div>`).join("");
+    if (list.length) $("list").innerHTML = list.slice().reverse().map(x => {
+      const trust = x.trust_score !== undefined ? x.trust_score : (100 - x.risk);
+      return `<div class="lic" tabindex="0" role="button" data-id="${x.id}" aria-current="${x.id === sel}">
+         <div>${x.id}<small>${esc(x.product)} | Trust: <b>${trust}/100</b> | ${x.activations} acts${x.revoked ? (x.auto_revoked ? " | AUTO-REVOKED" : " | revoked") : ""}</small></div>
+         <span class="pill ${x.verdict}">${trust} Trust</span></div>`;
+    }).join("");
     if (sel) render(await fetch("/api/license/" + sel).then(r => r.json()));
   } catch (e) {}
 }
@@ -137,7 +214,118 @@ $("issue").onclick = async () => {
 };
 $("copy").onclick = () => { if ($("key").value) navigator.clipboard.writeText($("key").value); };
 $("revoke").onclick = async () => { if (sel) { render(await post("/api/revoke/" + sel)); refresh(); } };
+$("unrevoke").onclick = async () => { if (sel) { render(await post("/api/unrevoke/" + sel)); refresh(); } };
 drawMap([]); refresh(); setInterval(refresh, 2000);
+
+// ---------- AI Audit Log + Manual Overrides ----------
+const threatColor = t => t === "LOW" ? "green" : t === "MEDIUM" ? "yellow" : "red";
+const actionLabel = a => a === "BLOCK" ? "BLOCK" : a === "WARN" ? "WARN" : a === "ALLOW" ? "ALLOW" : "-";
+
+let showBlocksOnly = false;
+
+async function loadAudit() {
+  try {
+    const [rows, blocks] = await Promise.all([
+      fetch("/api/ai-audit").then(r => r.json()),
+      fetch("/api/gemini-blocks").then(r => r.json())
+    ]);
+    $("blockCount").textContent = blocks.length;
+    
+    const displayList = showBlocksOnly ? rows.filter(e => e.ai_action === "BLOCK" || e.final_verdict === "red") : rows;
+    
+    $("auditBody").innerHTML = displayList.length ? displayList.map(e => {
+      const t = new Date(e.ts * 1000).toLocaleTimeString();
+      const tc = threatColor(e.ai_threat);
+      const ov = e.manual_override !== "none" ? `<b>${e.manual_override}</b>` : "<span class='muted'>-</span>";
+      const isBlocked = e.ai_action === "BLOCK";
+      return `<tr style="${isBlocked ? 'background:rgba(200,49,43,0.06);' : ''}">
+        <td>${t}</td><td>${esc(e.device)}</td><td>${e.country}</td><td>${esc(e.ip)}</td>
+        <td><b>${actionLabel(e.ai_action)}</b></td>
+        <td class="${tc}">${e.ai_threat || "-"}</td>
+        <td>${esc(e.ai_attack_type || "none")}</td>
+        <td class="${e.final_allowed ? 'green' : 'red'}">${e.final_allowed ? "Allowed" : "Blocked"}</td>
+        <td>${ov}</td>
+        <td style="white-space:nowrap">
+          <button class="alt" style="padding:4px 8px;font-size:12px" onclick="setOverride('${esc(e.key)}','${esc(e.device)}','ALLOW')">Allow</button>
+          <button class="danger" style="padding:4px 8px;font-size:12px" onclick="setOverride('${esc(e.key)}','${esc(e.device)}','BLOCK')">Block</button>
+          <button class="alt" style="padding:4px 8px;font-size:12px" onclick="setOverride('${esc(e.key)}','${esc(e.device)}','CLEAR')">Clear</button>
+        </td></tr>`;
+    }).join("") : `<tr><td colspan="10" class="empty">${showBlocksOnly ? "No requests blocked by threat engine." : "No evaluation records logged yet."}</td></tr>`;
+  } catch (e) {}
+}
+
+$("filterBlocked").onclick = () => {
+  showBlocksOnly = !showBlocksOnly;
+  $("filterBlocked").textContent = showBlocksOnly ? "Show all evaluation records" : `Filter: Blocked requests (${$("blockCount").textContent})`;
+  loadAudit();
+};
+
+
+async function loadOverrides() {
+  try {
+    const list = await fetch("/api/ai-overrides").then(r => r.json());
+    $("overrideCount").textContent = list.length;
+    $("overridesBody").innerHTML = list.length ? list.map(o =>
+      `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)">
+        <span>Key: <code>...${esc(o.key.slice(-10))}</code> | Device: <b>${esc(o.device)}</b> &rarr; <span class="${o.action==='ALLOW'?'green':'red'}">${o.action}</span></span>
+        <button class="alt" style="padding:3px 8px;font-size:12px" onclick="setOverride('${esc(o.key)}','${esc(o.device)}','CLEAR')">Remove</button>
+      </div>`
+    ).join("") : "<span class='muted'>No active overrides.</span>";
+  } catch (e) {}
+}
+
+async function setOverride(key, device, action) {
+  try {
+    const r = await post("/api/ai-override", { key, device, action });
+    if (r.message) { const prev = $("refreshAudit").textContent; $("refreshAudit").textContent = r.message; setTimeout(() => $("refreshAudit").textContent = prev, 2000); }
+    loadAudit(); loadOverrides();
+  } catch (e) {}
+}
+
+$("refreshAudit").onclick = () => { loadAudit(); loadOverrides(); };
+$("showOverrides").onclick = () => { $("overridesList").hidden = !$("overridesList").hidden; loadOverrides(); };
+
+// ---------- Honeypot & Deception Telemetry Logic ----------
+async function loadHoneypot() {
+  try {
+    const data = await fetch("/api/honeypot-telemetry").then(r => r.json());
+    $("canaryCount").textContent = data.traps.length;
+    $("trapHits").textContent = data.events.length;
+    
+    $("canaryList").innerHTML = data.traps.length ? data.traps.map(t =>
+      `<div style="padding:6px; border:1px solid var(--line); border-radius:4px; margin-bottom:6px; background:var(--bg)">
+        <div style="display:flex; justify-content:space-between;"><b>${esc(t.label)}</b> <span>Hits: <b>${t.triggered_count}</b></span></div>
+        <div style="font-family:monospace; font-size:12px; margin-top:3px; word-break:break-all;"><code>${esc(t.key)}</code></div>
+        <div style="color:var(--muted); font-size:11px;">IPs trapped: ${t.ips.length ? t.ips.join(", ") : "None yet"}</div>
+      </div>`
+    ).join("") : "<span class='muted'>No active canary keys deployed.</span>";
+
+    $("honeypotBody").innerHTML = data.events.length ? data.events.map(ev =>
+      `<tr>
+        <td>${esc(ev.time_str.split(" ")[1] || ev.time_str)}</td>
+        <td><code>${esc(ev.signature)}</code></td>
+        <td>${esc(ev.label)}</td>
+        <td>${esc(ev.ip)}</td>
+        <td>${esc(ev.device)}</td>
+        <td class="red"><b>BLOCKED &amp; TRAPPED</b></td>
+      </tr>`
+    ).join("") : `<tr><td colspan="6" class="empty">No canary keys tripped yet. Traps are listening.</td></tr>`;
+  } catch (e) {}
+}
+
+$("spawnCanary").onclick = async () => {
+  const label = $("canaryLabel").value.trim() || "pastebin-decoy-" + Math.floor(Math.random() * 900 + 100);
+  try {
+    const res = await post("/api/honeypot-spawn", { label });
+    $("canaryLabel").value = "";
+    loadHoneypot();
+  } catch (e) {}
+};
+
+$("refreshHoneypot").onclick = loadHoneypot;
+
+loadAudit(); setInterval(loadAudit, 5000);
+loadHoneypot(); setInterval(loadHoneypot, 5000);
 </script>
 </body>
 </html>
