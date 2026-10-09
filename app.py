@@ -1,5 +1,9 @@
-import base64, hashlib, hmac, ipaddress, json, math, random, re, secrets, time, uuid
+import base64, hashlib, hmac, ipaddress, json, math, os, random, re, secrets, time, uuid
 from pathlib import Path
+from dotenv import load_dotenv
+from google import genai
+
+load_dotenv()  # loads .env file automatically
 
 import numpy as np
 from cryptography.exceptions import InvalidSignature
@@ -16,10 +20,14 @@ app = FastAPI(title="License Guard")
 # Demo only: lets the attacker UI run from a different origin/port or machine
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# ---------- Gemini AI threat detection ----------
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
 # ---------- Developer console is private-network only ----------
 # Public (through a tunnel): /store, /attacker, sign-up/login/purchase, and /api/verify.
 # Private only: the developer console and every admin action (issue, list, inspect, revoke, simulate).
-ADMIN_PATHS = ("/api/issue", "/api/licenses", "/api/license/", "/api/revoke/", "/api/simulate")
+ADMIN_PATHS = ("/api/issue", "/api/licenses", "/api/license/", "/api/revoke/", "/api/unrevoke/", "/api/simulate", "/api/ai-audit", "/api/ai-override", "/api/gemini-blocks", "/api/honeypot-telemetry", "/api/honeypot-spawn")
 # Tunnels (Cloudflare, ngrok...) connect from this same computer, so the address alone looks local.
 # They always add these headers, which a direct visitor on your own network never sends.
 PROXY_HEADERS = ("cf-connecting-ip", "cf-ray", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded")
@@ -94,7 +102,8 @@ def issue(product="DemoSoft Pro", tier="pro", max_devices=3, days=365, owner=Non
     key = make_key()
     payload = {"id": "LIC-" + uuid.uuid4().hex[:8].upper(), "key": key, "product": product, "tier": tier,
                "max_devices": max_devices, "owner": owner, "issued": now, "expires": now + days * 86400}
-    LICENSES[payload["id"]] = {"payload": payload, "revoked": False, "acts": [],
+    LICENSES[payload["id"]] = {"payload": payload, "revoked": False, "auto_revoked": False,
+                               "trust_score": 100, "denied_count": 0, "acts": [],
                                "trusted": [], "pending": {}, "denied": set(), "bound": False, "tokens": {}}
     KEYS[key] = payload["id"]
     return key, payload
@@ -154,9 +163,14 @@ def assess(lic):
         rule += min(20, 2 * hour)
         reasons.append(f"{hour} activations in the last hour")
     refused = sum(1 for a in acts if a.get("status") in ("denied", "full", "flood", "badtoken"))
+    denied = lic.get("denied_count", 0) + len(lic.get("denied", set()))
     if refused:
-        rule += min(40, 3 * refused)
+        rule += min(45, 5 * refused)
         reasons.append(f"{refused} activation attempts were refused")
+    if denied:
+        rule += min(35, 8 * denied)
+        if not any("denied" in r for r in reasons):
+            reasons.append(f"{denied} device access request(s) were explicitly denied")
     if speed > 900:
         rule += 25
         reasons.append(f"Impossible travel: about {int(speed):,} km/h between two activations")
@@ -164,19 +178,31 @@ def assess(lic):
     if ml >= 50 and not reasons:
         reasons.append("Usage pattern is statistically unusual compared with normal licenses")
     risk = min(100, max(rule, ml))
+    # Trust score dynamically fluctuates between 0 and 100 inversely with risk
+    trust_score = max(0, 100 - risk)
     verdict = "green" if risk < 30 else "yellow" if risk < 70 else "red"
-    return {"risk": risk, "rule_score": rule, "ml_score": ml, "verdict": verdict, "reasons": reasons}
+    return {"risk": risk, "trust_score": trust_score, "rule_score": rule, "ml_score": ml, "verdict": verdict, "reasons": reasons}
 
 
 def view(lic, extra=None):
-    out = {"license": lic["payload"], "revoked": lic["revoked"], "activations": lic["acts"][-60:],
+    assessment = assess(lic)
+    risk = assessment["risk"]
+    # Auto-revoke if risk score goes above 85 (or trust drops below 15)
+    if risk > 85 and not lic["revoked"]:
+        lic["revoked"] = True
+        lic["auto_revoked"] = True
+        print(f"[AUTO-REVOKED] License {lic['payload']['id']} automatically revoked: Risk={risk} (> 85), Trust={assessment['trust_score']}.")
+
+    out = {"license": lic["payload"], "revoked": lic["revoked"], "auto_revoked": lic.get("auto_revoked", False),
+           "trust_score": assessment["trust_score"], "activations": lic["acts"][-60:],
            "slots_used": len(lic["trusted"]), "pending_count": len(lic["pending"]),
            "total_acts": len(lic["acts"]), "refused": sum(1 for a in lic["acts"] if a.get("status") in ("denied", "full", "flood", "badtoken")),
            "devices_seen": len({a["device"] for a in lic["acts"]}),
            "by_country": {c: sum(1 for a in lic["acts"] if a["country"] == c) for c in {a["country"] for a in lic["acts"]}}}
-    out.update(assess(lic))
+    out.update(assessment)
     if lic["revoked"]:
-        out.update(verdict="red", risk=100, reasons=["License was revoked by an administrator"] + out["reasons"])
+        revoke_reason = "License automatically revoked: risk score reached above 85" if lic.get("auto_revoked") else "License was revoked by an administrator"
+        out.update(verdict="red", risk=100, reasons=[revoke_reason] + [r for r in out["reasons"] if r != revoke_reason])
     out.update(extra or {})
     return out
 
@@ -270,6 +296,153 @@ def pending_assess(lic):
     return out
 
 
+# ---------- AI manual overrides + audit log ----------
+# key = f"{product_key}:{device}" -> "ALLOW" | "BLOCK"
+MANUAL_OVERRIDES = {}
+# Ordered list of every Gemini decision for admin review (capped at 200)
+AI_AUDIT_LOG = []
+# Dedicated log of all requests blocked by Gemini AI (capped at 200)
+GEMINI_BLOCK_LOG = []
+
+# ---------- Active Cyber Deception: AI Canary Keys & Honeypots ----------
+# Decoy keys planted in public code, leaked pastes, or simulated dumps.
+# If an attacker tries ANY canary key, AI instantly tracks their signature,
+# triggers synthetic license poisoning, and blacklists their device cluster.
+CANARY_TRAPS = {}
+HONEYPOT_TELEMETRY = []
+
+
+def is_canary_key(key: str):
+    raw = re.sub(r"[^A-Za-z0-9]", "", key or "").upper()
+    fmt_key = "-".join(raw[i:i + 5] for i in range(0, 25, 5)) if len(raw) == 25 else raw
+    return CANARY_TRAPS.get(fmt_key) or CANARY_TRAPS.get(key.strip().upper())
+
+
+def register_canary(label: str = "leaked-pastebin"):
+    key = make_key()
+    CANARY_TRAPS[key] = {
+        "created_at": time.time(),
+        "label": label,
+        "triggered_count": 0,
+        "trapped_ips": set()
+    }
+    return key
+
+# Deploy initial seed canary trap
+DEFAULT_CANARY = register_canary("darkweb-paste-dump")
+
+
+def record_gemini_block(key, device, country, ip, threat, attack_type, confidence, reasoning):
+    entry = {
+        "ts": time.time(),
+        "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "key": key,
+        "device": device,
+        "country": country,
+        "ip": ip,
+        "threat_level": threat,
+        "attack_type": attack_type,
+        "confidence": confidence,
+        "reasoning": reasoning
+    }
+    GEMINI_BLOCK_LOG.append(entry)
+    if len(GEMINI_BLOCK_LOG) > 200:
+        GEMINI_BLOCK_LOG.pop(0)
+    print(f"[GEMINI ATTACK BLOCKED] [{entry['time_str']}] Key: ...{key[-5:] if len(key) >= 5 else key} | Device: '{device}' | Country: {country} | IP: {ip} | Threat: {threat} | Attack: {attack_type} | Reason: {reasoning}")
+    return entry
+
+
+class OverrideReq(BaseModel):
+    key: str          # the DemoSoft product key
+    device: str       # the device name to override
+    action: str       # "ALLOW" | "BLOCK" | "CLEAR"
+
+
+def gemini_threat_analysis(lic, device, country, ip, key_status, token_provided):
+    if gemini_client is None:
+        return {"threat_level": "LOW", "action": "ALLOW", "confidence": 1.0, "attack_type": "none", "reasoning": "Gemini AI not configured", "recommendation": "None"}
+    
+    try:
+        payload = lic["payload"]
+        history = [{"device": a["device"], "country": a["country"], "ts": a["ts"], "status": a.get("status"), "ip": a.get("ip")} for a in lic["acts"][-20:]]
+        risk_scores = assess(lic)
+        fails = len(FAILS.get(ip, []))
+        computed_features = features(lic["acts"])
+
+        context = {
+            "request": {
+                "device": device,
+                "country": country,
+                "ip": ip,
+                "key_status": key_status,
+                "token_provided": token_provided,
+                "ip_failed_attempts": fails
+            },
+            "license": {
+                "product": payload["product"],
+                "tier": payload["tier"],
+                "max_devices": payload["max_devices"],
+                "owner": payload.get("owner")
+            },
+            "state": {
+                "trusted_devices": lic["trusted"],
+                "pending_devices": {d: info["country"] for d, info in lic["pending"].items()},
+                "denied_devices": list(lic["denied"]),
+                "recent_history": history,
+                "risk_scores": risk_scores,
+                "computed_features": {
+                    "distinct_devices": computed_features[0],
+                    "distinct_countries": computed_features[1],
+                    "activations_last_hour": computed_features[2],
+                    "max_travel_speed_kmh": computed_features[3]
+                }
+            }
+        }
+        
+        prompt = """You are a security AI for a software licensing system called License Guard by DemoSoft.
+Your job is to analyze each access request and determine if it is an attack, fraud, key sharing abuse, or legitimate use.
+
+You MUST respond with EXACTLY this JSON format and nothing else:
+{
+  "threat_level": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
+  "action": "ALLOW" | "WARN" | "BLOCK",
+  "confidence": 0.0 to 1.0,
+  "attack_type": "none" | "key_sharing" | "brute_force" | "impossible_travel" | "device_impersonation" | "approval_flooding" | "credential_stuffing" | "automated_attack" | "velocity_anomaly",
+  "reasoning": "One paragraph explaining your analysis",
+  "recommendation": "One sentence for the system admin"
+}
+
+Rules:
+- If the request is from the first device binding to a license and everything looks normal, threat is LOW and action is ALLOW.
+- If the device is already trusted and presents a valid token, threat is LOW and action is ALLOW.
+- If there are multiple countries in short time spans (impossible travel), threat is HIGH or CRITICAL, action is BLOCK.
+- If the same IP has many failed attempts, threat is HIGH, action is BLOCK.
+- If device names look auto-generated and arrive in rapid bursts, this is approval flooding, threat is CRITICAL, action is BLOCK.
+- If a known device name is used without the correct token, this is device impersonation, threat is CRITICAL, action is BLOCK.
+- If the license has activations from many devices beyond its limit, threat is HIGH, action is BLOCK.
+- If a device is pending approval, threat is MEDIUM at most, action is WARN (let the owner decide).
+- When in doubt, err on the side of security.
+- NEVER output anything except the JSON object.
+"""
+        
+        response = gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt + "\n\nContext:\n" + json.dumps(context)
+        )
+        
+        try:
+            text = response.text.strip()
+            if text.startswith("```json"): text = text[7:]
+            if text.startswith("```"): text = text[3:]
+            if text.endswith("```"): text = text[:-3]
+            return json.loads(text.strip())
+        except Exception:
+            return {"threat_level": "LOW", "action": "ALLOW", "confidence": 0.0, "attack_type": "none", "reasoning": "Failed to parse Gemini response", "recommendation": "Check logs"}
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        return {"threat_level": "LOW", "action": "ALLOW", "confidence": 0.0, "attack_type": "none", "reasoning": "Gemini API error occurred", "recommendation": "Check API key"}
+
+
 # ---------- API ----------
 class IssueReq(BaseModel):
     product: str = "DemoSoft Pro"
@@ -325,6 +498,41 @@ def api_verify(r: VerifyReq, req: Request):
     if too_many_fails(ip):
         return {"verdict": "red", "risk": 100, "label": "Blocked", "license": None, "activations": [],
                 "allowed": False, "reasons": ["Too many invalid keys from this address. Blocked for one minute"]}
+    # Active Honeypot Trap check
+    canary = is_canary_key(r.key)
+    if canary:
+        canary["triggered_count"] += 1
+        canary["trapped_ips"].add(ip)
+        telemetry = {
+            "ts": time.time(),
+            "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "key": r.key.strip(),
+            "label": canary["label"],
+            "device": clean_device(r.device),
+            "country": clean_country(r.country),
+            "ip": ip,
+            "signature": f"TRAP-{uuid.uuid4().hex[:6].upper()}",
+            "verdict": "ATTACKER_CAPTURED"
+        }
+        HONEYPOT_TELEMETRY.append(telemetry)
+        if len(HONEYPOT_TELEMETRY) > 100:
+            HONEYPOT_TELEMETRY.pop(0)
+        FAILS.setdefault(ip, []).append(time.time())
+        print(f"[CYBER DECEPTION] Honeypot Canary triggered: Key=...{r.key.strip()[-5:]} | Label={canary['label']} | IP={ip} | Device={clean_device(r.device)} | Signature={telemetry['signature']}")
+        return {
+            "verdict": "red",
+            "risk": 100,
+            "trust_score": 0,
+            "label": "Decoy Trap Triggered",
+            "license": None,
+            "activations": [],
+            "allowed": False,
+            "reasons": [
+                f"Active cyber defense tripped: This credential signature ({telemetry['signature']}) was planted in public intelligence traps. Originating IP {ip} has been flagged for counter-surveillance."
+            ],
+            "honeypot_captured": True
+        }
+
     lic, status = parse(r.key)
     if status == "malformed":
         return reject("This is not a valid product key. Keys look like XXXXX-XXXXX-XXXXX-XXXXX-XXXXX")
@@ -339,6 +547,64 @@ def api_verify(r: VerifyReq, req: Request):
     ip = req.client.host if req.client else "?"
     status, new_token = add_act(lic, clean_device(r.device), clean_country(r.country), r.token, ip)
     res = view(lic, {"allowed": status == "ok", "status": status})
+    
+    gemini_result = gemini_threat_analysis(lic, clean_device(r.device), clean_country(r.country), ip, status, bool(r.token))
+
+    # --- Manual override check (admin always wins over AI) ---
+    override_key = f"{r.key.strip().upper()}:{clean_device(r.device)}"
+    manual = MANUAL_OVERRIDES.get(override_key)
+    if manual == "BLOCK":
+        res["allowed"] = False
+        res["verdict"] = "red"
+        res["risk"] = 100
+        res["reasons"].insert(0, "Manually blocked by administrator (override)")
+        gemini_result["action"] = "BLOCK"
+        gemini_result["overridden_by"] = "ADMIN_BLOCK"
+    elif manual == "ALLOW":
+        res["allowed"] = True
+        res["verdict"] = "green" if res.get("risk", 0) < 30 else "yellow"
+        res["risk"] = min(res.get("risk", 0), 25)
+        res["reasons"].insert(0, "Manually approved by administrator (override)")
+        gemini_result["action"] = "ALLOW"
+        gemini_result["overridden_by"] = "ADMIN_ALLOW"
+    else:
+        # No manual override — apply Gemini's decision
+        if gemini_result.get("action") == "BLOCK":
+            # Record directly into the dedicated Gemini Block Log
+            record_gemini_block(
+                key=r.key.strip(),
+                device=clean_device(r.device),
+                country=clean_country(r.country),
+                ip=ip,
+                threat=gemini_result.get("threat_level", "HIGH"),
+                attack_type=gemini_result.get("attack_type", "attack"),
+                confidence=gemini_result.get("confidence", 0.0),
+                reasoning=gemini_result.get("reasoning", "Access blocked by AI security analysis")
+            )
+            if status == "ok":
+                res["allowed"] = False
+                res["verdict"] = "red"
+                res["risk"] = max(res.get("risk", 0), 95)
+                res["reasons"].insert(0, f"Gemini AI threat detected: {gemini_result.get('reasoning')}")
+        elif gemini_result.get("action") == "WARN":
+            res["reasons"].append(f"Gemini AI advisory: {gemini_result.get('reasoning')}")
+        
+    res["gemini_analysis"] = gemini_result
+
+    # --- Record to audit log ---
+    audit_entry = {
+        "ts": time.time(), "key": r.key.strip(), "device": clean_device(r.device),
+        "country": clean_country(r.country), "ip": ip,
+        "ai_action": gemini_result.get("action"), "ai_threat": gemini_result.get("threat_level"),
+        "ai_attack_type": gemini_result.get("attack_type"), "ai_confidence": gemini_result.get("confidence"),
+        "ai_reasoning": gemini_result.get("reasoning"),
+        "manual_override": manual or "none",
+        "final_allowed": res.get("allowed", False), "final_verdict": res.get("verdict"),
+    }
+    AI_AUDIT_LOG.append(audit_entry)
+    if len(AI_AUDIT_LOG) > 200:
+        AI_AUDIT_LOG.pop(0)
+
     why = {"pending": "New device: waiting for the license owner to approve it before it can use this key",
            "denied": "The license owner denied this device",
            "full": "This device was refused: all device slots are already in use",
@@ -349,6 +615,69 @@ def api_verify(r: VerifyReq, req: Request):
     if new_token:
         res["device_token"] = new_token
     return public_view(res, lic)
+
+
+# ---------- AI audit log + manual override admin endpoints ----------
+@app.get("/api/ai-audit")
+def api_ai_audit():
+    """Return the last 200 Gemini AI decisions for admin review."""
+    return list(reversed(AI_AUDIT_LOG))
+
+
+@app.get("/api/gemini-blocks")
+def api_gemini_blocks():
+    """Return the list of requests specifically blocked by Gemini AI."""
+    return list(reversed(GEMINI_BLOCK_LOG))
+
+
+@app.get("/api/ai-overrides")
+def api_ai_overrides():
+    """Return all active manual overrides."""
+    out = []
+    for combo, action in MANUAL_OVERRIDES.items():
+        parts = combo.split(":", 1)
+        out.append({"key": parts[0] if parts else combo, "device": parts[1] if len(parts) > 1 else "?", "action": action})
+    return out
+
+
+# ---------- Active Cyber Deception endpoints ----------
+@app.get("/api/honeypot-telemetry")
+def api_honeypot_telemetry():
+    """Return trapped attackers and active canary key telemetry."""
+    return {
+        "traps": [
+            {"key": k, "label": v["label"], "triggered_count": v["triggered_count"], "ips": list(v["trapped_ips"])}
+            for k, v in CANARY_TRAPS.items()
+        ],
+        "events": list(reversed(HONEYPOT_TELEMETRY))
+    }
+
+
+class CanarySpawnReq(BaseModel):
+    label: str = "pastebin-leak-decoy"
+
+
+@app.post("/api/honeypot-spawn")
+def api_honeypot_spawn(r: CanarySpawnReq):
+    """Deploy a new active canary honeypot key."""
+    key = register_canary(r.label)
+    return {"key": key, "label": r.label, "status": "deployed"}
+
+
+
+@app.post("/api/ai-override")
+def api_ai_override(r: OverrideReq):
+    """Set or clear a manual override for a specific key+device combination."""
+    key = r.key.strip().upper()
+    device = clean_device(r.device)
+    combo = f"{key}:{device}"
+    if r.action.upper() == "CLEAR":
+        MANUAL_OVERRIDES.pop(combo, None)
+        return {"ok": True, "message": f"Override cleared for {device} on key ...{key[-5:]}"}
+    if r.action.upper() not in ("ALLOW", "BLOCK"):
+        raise HTTPException(400, "Action must be ALLOW, BLOCK, or CLEAR")
+    MANUAL_OVERRIDES[combo] = r.action.upper()
+    return {"ok": True, "message": f"Override set: {r.action.upper()} for {device} on key ...{key[-5:]}"}
 
 
 @app.post("/api/simulate")
@@ -373,7 +702,25 @@ def api_revoke(lid: str):
     if lid not in LICENSES:
         raise HTTPException(404, "Unknown license")
     LICENSES[lid]["revoked"] = True
+    LICENSES[lid]["auto_revoked"] = False
     return view(LICENSES[lid])
+
+
+@app.post("/api/unrevoke/{lid}")
+def api_unrevoke(lid: str):
+    """Developer/admin only action: restores an automatically or manually revoked license."""
+    if lid not in LICENSES:
+        raise HTTPException(404, "Unknown license")
+    lic = LICENSES[lid]
+    lic["revoked"] = False
+    lic["auto_revoked"] = False
+    # Clear excessive suspicious refusal logs from acts so risk doesn't immediately bounce back over 85
+    # Retain recent normal activity but clear refused spam
+    lic["acts"] = [a for a in lic["acts"] if a.get("status") not in ("flood", "badtoken", "denied")][-10:]
+    lic["denied"] = set()
+    print(f"[UNREVOKED BY DEVELOPER] License {lid} has been unrevoked and reinstated.")
+    return view(lic)
+
 
 
 # ---------- Customer store: accounts + purchase -> key ----------
@@ -467,7 +814,8 @@ def api_my_licenses(user: str = Depends(current_user)):
             p = l["payload"]
             pending_scores = pending_assess(l)
             out.append({"key": p["key"], "product": p["product"], "tier": p["tier"], "max_devices": p["max_devices"],
-                        "expires": p["expires"], "revoked": l["revoked"], "slots_used": v["slots_used"],
+                        "expires": p["expires"], "revoked": l["revoked"], "auto_revoked": l.get("auto_revoked", False),
+                        "trust_score": v.get("trust_score", 100), "slots_used": v["slots_used"],
                         "verdict": v["verdict"], "trusted": list(l["trusted"]),
                         "pending": [{"device": d, "country": info["country"], **pending_scores.get(d, {"risk": 0, "verdict": "green", "reasons": []})}
                                     for d, info in l["pending"].items()]})
@@ -489,8 +837,17 @@ def api_device_decision(r: DecisionReq, user: str = Depends(current_user)):
         lic["pending"].pop(d)
         lic["trusted"].append(d)
     elif r.action == "deny":
-        lic["pending"].pop(d, None)
+        pend_info = lic["pending"].pop(d, None)
         lic["denied"].add(d)
+        lic["denied_count"] = lic.get("denied_count", 0) + 1
+        country = pend_info["country"] if pend_info else "XX"
+        lat, lon = COUNTRIES.get(country, (0, 0))
+        # Log a refused activation entry so risk immediately increases and trust score drops below 100
+        lic["acts"].append({
+            "ts": time.time(), "device": d, "country": country,
+            "lat": lat, "lon": lon, "allowed": False, "status": "denied",
+            "ip": pend_info.get("ip", "?") if pend_info else "?"
+        })
     elif r.action == "remove":
         if d in lic["trusted"]:
             lic["trusted"].remove(d)
@@ -504,7 +861,9 @@ def api_device_decision(r: DecisionReq, user: str = Depends(current_user)):
 def api_licenses():
     rows = [view(l) for l in LICENSES.values()]
     return [{"id": r["license"]["id"], "product": r["license"]["product"], "tier": r["license"]["tier"],
-             "risk": r["risk"], "verdict": r["verdict"], "revoked": r["revoked"], "owner": r["license"].get("owner"),
+             "risk": r["risk"], "trust_score": r.get("trust_score", 100), "verdict": r["verdict"],
+             "revoked": r["revoked"], "auto_revoked": r.get("auto_revoked", False),
+             "owner": r["license"].get("owner"),
              "activations": len(LICENSES[r["license"]["id"]]["acts"])} for r in rows]
 
 
