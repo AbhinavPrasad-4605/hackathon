@@ -3,3 +3,5 @@ uvicorn
 cryptography
 scikit-learn
 numpy
+google-genai
+python-dotenv
