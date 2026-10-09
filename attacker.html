@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pirate console (attack simulator)</title>
+<style>
+  :root { --bg:#150d0d; --panel:#1e1313; --ink:#f1e4e0; --muted:#a58f8a; --line:#3b2624; --hot:#ff6a4d; --ok:#5fd38d; --warn:#f0b43c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px; }
+  header h1 { font-size:18px; margin:0; color:var(--hot); } header span { color:var(--muted); font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:20px; display:grid; gap:16px; grid-template-columns:360px 1fr; }
+  @media (max-width:820px) { main { grid-template-columns:1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:16px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  label { display:block; color:var(--muted); font-size:13px; margin:10px 0 3px; }
+  input, select, textarea { width:100%; padding:8px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--ink); font:inherit; }
+  textarea { height:96px; font:12px monospace; word-break:break-all; }
+  button { padding:8px 12px; border:1px solid var(--hot); background:var(--hot); color:#210b07; font:inherit; font-weight:600; border-radius:4px; cursor:pointer; }
+  button.alt { background:transparent; color:var(--ink); border-color:var(--line); font-weight:400; }
+  button:disabled { opacity:.5; cursor:wait; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline:2px solid var(--warn); outline-offset:2px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .hint { color:var(--muted); font-size:13px; margin:8px 0 0; }
+  .stack { display:grid; gap:16px; align-content:start; }
+  #log { font:13px/1.6 ui-monospace, Consolas, monospace; height:430px; overflow:auto; background:var(--bg); border:1px solid var(--line); border-radius:4px; padding:10px; }
+  #log div { border-bottom:1px solid var(--line); padding:3px 0; }
+  .ok { color:var(--ok); } .bad { color:var(--hot); } .warn { color:var(--warn); } .dim { color:var(--muted); }
+  .stats { display:flex; gap:22px; flex-wrap:wrap; margin-bottom:10px; }
+  .stats b { font-size:26px; display:block; line-height:1.1; } .stats span { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<header><h1>Pirate console</h1><span>A separate client. It only calls the public verify endpoint, like a real cracked copy would.</span></header>
+<main>
+  <div class="stack">
+    <section>
+      <h2>Target</h2>
+      <label for="server">License server URL</label>
+      <input id="server" placeholder="http://localhost:8000">
+      <label for="key">Stolen license key</label>
+      <textarea id="key" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"></textarea>
+      <label for="country">Country for single activation</label>
+      <select id="country"></select>
+    </section>
+    <section>
+      <h2>Attacks</h2>
+      <div class="row"><button id="one" class="alt">Activate once</button></div>
+      <div class="row"><button id="share">Share key with 14 strangers</button></div>
+      <p class="hint">Fake devices from random countries, one every 350 ms.</p>
+      <div class="row"><button id="travel" class="alt">Impossible travel</button></div>
+      <p class="hint">Activates from India, then Brazil seconds later.</p>
+      <div class="row"><button id="tamper" class="alt">Mistype one character</button></div>
+      <div class="row"><button id="forge" class="alt">Make up a key</button></div>
+      <div class="row"><button id="guess" class="alt">Guess 12 random keys</button></div>
+      <p class="hint">Without the server's secret, an attacker cannot produce a valid check code, so these fail. After 10 bad keys in a minute the server blocks the address.</p>
+    </section>
+  </div>
+  <div class="stack">
+    <section>
+      <div class="stats">
+        <div><b id="sAcc">0</b><span>Accepted</span></div>
+        <div><b id="sRef">0</b><span>Refused</span></div>
+        <div><b id="sRisk">--</b><span>Risk the server reports</span></div>
+      </div>
+      <div id="log" role="log" aria-live="polite"><div class="dim">Paste a key, then pick an attack.</div></div>
+      <div class="row"><button id="clear" class="alt">Clear log</button></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const C = ["IN","US","DE","BR","JP","AU","GB","RU"];
+C.forEach(c => $("country").add(new Option(c, c)));
+$("server").value = location.protocol.startsWith("http") ? location.origin : "http://localhost:8000";
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let acc = 0, ref = 0;
+
+function log(text, cls) {
+  const d = document.createElement("div"); d.className = cls || ""; d.textContent = new Date().toLocaleTimeString() + "  " + text;
+  $("log").appendChild(d); $("log").scrollTop = $("log").scrollHeight;
+}
+async function activate(key, device, country) {
+  try {
+    const r = await fetch($("server").value.replace(/\/$/, "") + "/api/verify", {
+      method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ key, device, country }) }).then(r => r.json());
+    const good = r.allowed === true, why = (r.reasons && r.reasons[0]) || "";
+    if (good) acc++; else ref++;
+    $("sAcc").textContent = acc; $("sRef").textContent = ref; $("sRisk").textContent = r.risk;
+    log(`${device} from ${country}: ${good ? "ACCEPTED" : "REJECTED"} | risk ${r.risk} (${r.verdict})${why ? " | " + why : ""}`, good ? (r.verdict === "green" ? "ok" : "warn") : "bad");
+    return r;
+  } catch (e) { log("Cannot reach server: " + e.message, "bad"); }
+}
+const getKey = () => { const k = $("key").value.trim(); if (!k) log("Paste a license key first.", "warn"); return k; };
+const busy = async fn => { document.querySelectorAll("button").forEach(b => b.disabled = true); try { await fn(); } finally { document.querySelectorAll("button").forEach(b => b.disabled = false); } };
+const dev = () => "pirate-" + Math.random().toString(36).slice(2, 6);
+
+$("one").onclick = () => { const k = getKey(); if (k) busy(() => activate(k, dev(), $("country").value)); };
+$("share").onclick = () => { const k = getKey(); if (k) busy(async () => {
+  log("Sharing the key with 14 strangers...", "dim");
+  for (let i = 0; i < 14; i++) { await activate(k, dev(), C[Math.floor(Math.random() * C.length)]); await sleep(350); } }); };
+$("travel").onclick = () => { const k = getKey(); if (k) busy(async () => {
+  log("Activating from India, then Brazil...", "dim");
+  await activate(k, dev(), "IN"); await sleep(400); await activate(k, dev(), "BR"); }); };
+const AL = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const pickc = () => AL[Math.floor(Math.random() * AL.length)];
+const randKey = () => Array.from({ length: 5 }, () => Array.from({ length: 5 }, pickc).join("")).join("-");
+$("tamper").onclick = () => { const k = getKey(); if (!k) return;
+  const pos = [...k].map((c, i) => AL.includes(c) ? i : -1).filter(i => i >= 0);
+  if (!pos.length) return log("That does not look like a product key.", "warn");
+  const i = pos[Math.floor(Math.random() * pos.length)]; let c; do { c = pickc(); } while (c === k[i]);
+  const bad = k.slice(0, i) + c + k.slice(i + 1); $("key").value = bad;
+  log("Changed one character of the key. Sending it...", "dim");
+  busy(() => activate(bad, dev(), $("country").value)); };
+$("forge").onclick = () => busy(async () => {
+  const key = randKey(); $("key").value = key;
+  log("Made up a key in the right format. Sending it...", "dim");
+  await activate(key, dev(), $("country").value); });
+$("guess").onclick = () => busy(async () => {
+  log("Guessing 12 random keys...", "dim");
+  for (let i = 0; i < 12; i++) { await activate(randKey(), dev(), $("country").value); await sleep(150); } });
+$("clear").onclick = () => { $("log").innerHTML = ""; acc = ref = 0; $("sAcc").textContent = $("sRef").textContent = 0; $("sRisk").textContent = "--"; };
+</script>
+</body>
+</html>

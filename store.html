@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DemoSoft store</title>
+<style>
+  :root { --bg:#eef0f7; --panel:#fff; --ink:#14183a; --muted:#5b6082; --line:#d3d7ea; --accent:#3b3fd8; --on:#fff;
+          --green:#1f9d55; --yellow:#b27800; --red:#c8312b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0e1024; --panel:#171a38; --ink:#e8eaff; --muted:#9a9fc8; --line:#2b2f57; --accent:#8e92ff; --on:#0e1024; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 "Segoe UI", system-ui, sans-serif; }
+  header { background:var(--panel); border-bottom:1px solid var(--line); padding:14px 20px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+  header b { font-size:19px; } header span { color:var(--muted); font-size:14px; margin-right:10px; }
+  main { max-width:960px; margin:0 auto; padding:24px 20px 60px; display:grid; gap:22px; }
+  h1 { font-size:30px; line-height:1.2; margin:0 0 6px; } h2 { font-size:18px; margin:0 0 12px; }
+  p { margin:0 0 10px; } .muted { color:var(--muted); font-size:14px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:20px; }
+  label { display:block; color:var(--muted); font-size:14px; margin:12px 0 4px; }
+  input { width:100%; padding:10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit; }
+  button { padding:10px 16px; border:1px solid var(--accent); background:var(--accent); color:var(--on); border-radius:6px; font:inherit; font-weight:600; cursor:pointer; }
+  button.alt { background:transparent; color:var(--ink); border-color:var(--line); font-weight:400; }
+  button:focus-visible, input:focus-visible { outline:2px solid var(--yellow); outline-offset:2px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+  .tabs button { border-radius:6px 6px 0 0; } .tabs { display:flex; gap:6px; margin-bottom:14px; }
+  .err { color:var(--red); min-height:22px; margin-top:10px; font-size:14px; }
+  .plans { display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); }
+  .plan { border:1px solid var(--line); border-radius:8px; padding:16px; display:flex; flex-direction:column; gap:6px; }
+  .plan[aria-current="true"] { border:2px solid var(--accent); padding:15px; }
+  .plan .price { font-size:28px; font-weight:700; } .plan button { margin-top:auto; }
+  .sticker { border:2px dashed var(--accent); border-radius:8px; padding:18px; text-align:center; background:var(--bg); }
+  .sticker code { display:block; font:700 clamp(17px, 4.6vw, 28px) ui-monospace, Consolas, monospace; letter-spacing:.06em; word-break:break-all; margin:6px 0 12px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; } th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  td code { font:13px ui-monospace, Consolas, monospace; } .wrap { overflow-x:auto; }
+  .green { color:var(--green); } .yellow { color:var(--yellow); } .red { color:var(--red); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<header><b>DemoSoft</b><div><span id="who"></span><button id="logout" class="alt" hidden>Log out</button></div></header>
+<main>
+  <section id="authView">
+    <h1>Buy DemoSoft and get your key instantly</h1>
+    <p class="muted">Create an account or log in. After you buy, your product key appears here and stays on your account.</p>
+    <div class="tabs"><button id="tLogin" type="button">Log in</button><button id="tSign" type="button" class="alt">Create account</button></div>
+    <form id="authForm">
+      <label for="email">Email</label><input id="email" type="email" autocomplete="email" required>
+      <label for="pw">Password (at least 6 characters)</label><input id="pw" type="password" autocomplete="current-password" required>
+      <div class="row"><button id="authBtn" type="submit">Log in</button></div>
+      <div class="err" id="authErr" role="alert"></div>
+    </form>
+  </section>
+
+  <div id="shopView" hidden style="display:grid;gap:22px">
+    <section>
+      <h2>Choose a plan</h2>
+      <div class="plans" id="plans"></div>
+    </section>
+    <section id="checkout" hidden>
+      <h2>Checkout</h2>
+      <p id="summary"></p>
+      <p class="muted">This is a demo. No real payment is taken and no card details are asked for.</p>
+      <div class="row"><button id="pay">Pay now</button><button id="cancel" class="alt">Cancel</button></div>
+      <div class="err" id="buyErr" role="alert"></div>
+    </section>
+    <section id="receipt" hidden>
+      <h2>Thank you. Here is your product key</h2>
+      <div class="sticker"><div class="muted">Enter this key in DemoSoft to activate</div><code id="newKey"></code><button id="copy">Copy key</button></div>
+    </section>
+    <section>
+      <h2>Your licenses</h2>
+      <div class="wrap"><table>
+        <thead><tr><th>Key</th><th>Plan</th><th>Devices used</th><th>Valid until</th><th>Status</th></tr></thead>
+        <tbody id="mine"></tbody>
+      </table></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const mem = { get() { try { return JSON.parse(sessionStorage.getItem("ds") || "null"); } catch (e) { return null; } },
+              set(v) { try { v ? sessionStorage.setItem("ds", JSON.stringify(v)) : sessionStorage.removeItem("ds"); } catch (e) {} } };
+let me = mem.get(), mode = "login", plans = [], chosen = null;
+const money = n => "\u20B9" + n.toLocaleString("en-IN");
+const status = { green:"Active", yellow:"Under review", red:"Flagged" };
+
+async function api(url, body) {
+  const r = await fetch(url, { method: body ? "POST" : "GET",
+    headers: { "Content-Type":"application/json", ...(me ? { Authorization:"Bearer " + me.token } : {}) },
+    body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && me) { signOut(); }
+  if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : "Check your details and try again");
+  return j;
+}
+function signOut() { me = null; mem.set(null); show(); }
+function setMode(m) {
+  mode = m; $("tLogin").className = m === "login" ? "" : "alt"; $("tSign").className = m === "signup" ? "" : "alt";
+  $("authBtn").textContent = m === "login" ? "Log in" : "Create account";
+  $("pw").autocomplete = m === "login" ? "current-password" : "new-password"; $("authErr").textContent = "";
+}
+function show() {
+  $("authView").hidden = !!me; $("shopView").hidden = !me; $("logout").hidden = !me;
+  $("who").textContent = me ? me.email : "";
+  if (me) { loadPlans(); loadMine(); }
+}
+async function loadPlans() {
+  plans = await api("/api/store/products");
+  $("plans").innerHTML = plans.map(p => `<div class="plan" aria-current="${p.tier === chosen}">
+      <b>${p.name}</b><div class="price">${money(p.price)}</div>
+      <div class="muted">${p.devices} device${p.devices > 1 ? "s" : ""} | 1 year</div>
+      <button data-t="${p.tier}" class="${p.tier === chosen ? "" : "alt"}">${p.tier === chosen ? "Selected" : "Choose"}</button></div>`).join("");
+}
+async function loadMine() {
+  try {
+    const rows = await api("/api/my-licenses");
+    $("mine").innerHTML = rows.map(l => {
+      const v = l.revoked ? "red" : l.verdict;
+      return `<tr><td><code>${l.key}</code></td><td>${l.product}</td><td>${l.slots_used} of ${l.max_devices}</td>
+        <td>${new Date(l.expires * 1000).toLocaleDateString()}</td><td class="${v}">${l.revoked ? "Revoked" : status[l.verdict]}</td></tr>`;
+    }).join("") || `<tr><td colspan="5" class="muted">You have no licenses yet. Choose a plan above.</td></tr>`;
+  } catch (e) {}
+}
+
+$("tLogin").onclick = () => setMode("login"); $("tSign").onclick = () => setMode("signup");
+$("authForm").onsubmit = async e => {
+  e.preventDefault();
+  try {
+    const r = await api(mode === "login" ? "/api/login" : "/api/signup", { email: $("email").value, password: $("pw").value });
+    me = r; mem.set(me); $("pw").value = ""; show();
+  } catch (err) { $("authErr").textContent = err.message; }
+};
+$("logout").onclick = signOut;
+$("plans").onclick = e => {
+  const t = e.target.dataset.t; if (!t) return;
+  chosen = t; const p = plans.find(x => x.tier === t);
+  $("summary").textContent = `${p.name}: ${p.devices} device${p.devices > 1 ? "s" : ""}, valid for 1 year, total ${money(p.price)}.`;
+  $("checkout").hidden = false; $("buyErr").textContent = ""; $("receipt").hidden = true; loadPlans();
+};
+$("cancel").onclick = () => { chosen = null; $("checkout").hidden = true; loadPlans(); };
+$("pay").onclick = async () => {
+  try {
+    const r = await api("/api/purchase", { tier: chosen });
+    $("newKey").textContent = r.key; $("receipt").hidden = false; $("checkout").hidden = true;
+    chosen = null; loadPlans(); loadMine(); $("receipt").scrollIntoView({ behavior:"smooth" });
+  } catch (err) { $("buyErr").textContent = err.message; }
+};
+$("copy").onclick = () => { navigator.clipboard.writeText($("newKey").textContent); $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy key", 1500); };
+setMode("login"); show();
+</script>
+</body>
+</html>
