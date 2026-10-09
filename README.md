@@ -15,7 +15,7 @@ AI-Powered Identity Intelligence for Detecting Misuse of Legitimate Digital Cred
 License Guard issues short, Microsoft-style product keys (`XXXXX-XXXXX-XXXXX-XXXXX-XXXXX`) that are cryptographically checked, not guessable, and tracked server-side. Every activation is scored in real time by a rule engine plus an Isolation Forest model that looks at device count, country spread, activation rate and "impossible travel" between countries, producing a green/yellow/red risk verdict with plain-language reasons — this is the core identity-intelligence layer, since it flags misuse of a *valid* credential rather than just rejecting invalid ones. New devices beyond the first must be approved by the license owner, and a second Isolation Forest model scores *pending approval requests themselves* so the owner can spot an automated flood of fake devices versus a genuine new phone or laptop. The system ships as four interfaces — a customer store, a shared-key request page, a developer/admin console, and a standalone attack simulator — so the detection logic can be demonstrated end to end, from a credential being issued to it being misused and caught.
 
 ## 4. Architecture Diagram
-![Architecture Diagram](docs/architecture.png)
+![Architecture Diagram](Screenshots/architecture.png)
 
 A FastAPI backend holds all license state in memory and exposes four front ends against it. The **store** (`/store`) lets a customer sign up, buy a plan, and receive a key; it also shows pending device requests with their AI suspicion scores so the owner can approve or deny them. The **shared-key page** (`/use`) is where anyone holding a key that isn't theirs — a teammate, a friend, or an attacker — submits a device name and country to request access; the response explains in plain language whether they're in, waiting for approval, or blocked, and why. The **developer console** (`/`) is restricted to the private network (direct LAN or `localhost`; requests arriving through a public tunnel are blocked by header and address checks) and shows every issued license, its live risk score, activation map and history, with issue/revoke controls. The **attacker console** (`/attacker` or a standalone copied HTML file) is a separate client that only ever calls the public `/api/verify` endpoint — exactly what a pirated copy of the product would do — and can simulate key sharing, impossible travel, key tampering, key forging, device impersonation, and approval-queue flooding. All four talk to the same backend, so an attack run on one screen is visible as a risk-score and device-approval change on the others in real time.
 
@@ -49,7 +49,7 @@ cloudflared tunnel --url http://localhost:8000
 ```
 
 ## 7. Output Screenshots
-![Output Screenshot](docs/output.png)
+![Output Screenshot](Screenshots/output.png)
 
 The developer console mid-attack: the risk score climbs from green to red as simulated activations arrive, the activation map plots where each attempt came from, and the reasons list explains exactly which signals fired (device count exceeded, impossible travel detected, repeated refusals).
 
