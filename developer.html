@@ -88,10 +88,11 @@
         <button id="revoke" class="danger" disabled>Revoke license</button>
         <button id="unrevoke" class="alt" style="border-color:var(--green); color:var(--green); font-weight:600;" disabled>Reactivate license</button>
       </div>
+      <ul id="reasons" style="margin:12px 0 0; padding-left:18px; font-size:13px;"></ul>
     </section>
     <section>
       <h2>Activation map</h2>
-      <svg id="map" viewBox="0 0 360 180" role="img" aria-label="Activation locations"></svg>
+      <svg id="map" viewBox="0 0 360 180" style="width:100%; height:190px; display:block;" role="img" aria-label="Activation locations"></svg>
     </section>
     <section>
       <h2>Recent activations</h2>
@@ -196,12 +197,15 @@ function render(r) {
 async function refresh() {
   try {
     const list = await fetch("/api/licenses").then(r => r.json());
-    if (list.length) $("list").innerHTML = list.slice().reverse().map(x => {
-      const trust = x.trust_score !== undefined ? x.trust_score : (100 - x.risk);
-      return `<div class="lic" tabindex="0" role="button" data-id="${x.id}" aria-current="${x.id === sel}">
-         <div>${x.id}<small>${esc(x.product)} | Trust: <b>${trust}/100</b> | ${x.activations} acts${x.revoked ? (x.auto_revoked ? " | AUTO-REVOKED" : " | revoked") : ""}</small></div>
-         <span class="pill ${x.verdict}">${trust} Trust</span></div>`;
-    }).join("");
+    if (list.length) {
+      if (!sel) sel = list[list.length - 1].id;
+      $("list").innerHTML = list.slice().reverse().map(x => {
+        const trust = x.trust_score !== undefined ? x.trust_score : (100 - x.risk);
+        return `<div class="lic" tabindex="0" role="button" data-id="${x.id}" aria-current="${x.id === sel}">
+           <div>${x.id}<small>${esc(x.product)} | Trust: <b>${trust}/100</b> | ${x.activations} acts${x.revoked ? (x.auto_revoked ? " | AUTO-REVOKED" : " | revoked") : ""}</small></div>
+           <span class="pill ${x.verdict}">${trust} Trust</span></div>`;
+      }).join("");
+    }
     if (sel) render(await fetch("/api/license/" + sel).then(r => r.json()));
   } catch (e) {}
 }
