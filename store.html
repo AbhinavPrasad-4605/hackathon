@@ -153,7 +153,13 @@ async function loadMine() {
     if (rows.length) $("devices").innerHTML = rows.map(l => { const pend = [...l.pending].sort((a, b) => b.risk - a.risk);
       return `<div class="dev"><div><code>${l.key}</code> <span class="muted">${esc(l.product)}</span></div>
       ${l.trusted.map(d => `<div class="drow"><span>${esc(d)} <span class="muted">approved${d === myDev ? " (this browser)" : ""}</span></span>${btn("remove", l, d, "Remove", "alt")}</div>`).join("")}
-      ${pend.map(p => `<div class="drow wait"><span><span class="susbadge ${p.verdict}">${p.risk}</span><b>${esc(p.device)}</b> from ${esc(p.country)} <span class="muted">is waiting for your approval</span>${p.reasons.length ? `<span class="sreason">${esc(p.reasons[0])}</span>` : ""}</span><span>${btn("approve", l, p.device, "Approve", "")} ${btn("deny", l, p.device, "Deny", "alt")}</span></div>`).join("")}
+      ${pend.map(p => {
+        const flagBadge = p.flagged_adversary ? `<span class="susbadge red" style="background:rgba(200,49,43,0.15)">FLAGGED ADVERSARY</span>` : "";
+        return `<div class="drow wait" style="${p.flagged_adversary ? 'border:1.5px solid var(--red); background:rgba(200,49,43,0.06);' : ''}">
+          <span><span class="susbadge ${p.verdict}">Chance of Attack: ${p.risk}%</span>${flagBadge}<b>${esc(p.device)}</b> from ${esc(p.country)} <span class="muted">is waiting for your approval</span>${p.reasons.length ? `<span class="sreason" style="${p.flagged_adversary ? 'color:var(--red); font-weight:600;' : ''}">${esc(p.reasons[0])}</span>` : ""}</span>
+          <span>${btn("approve", l, p.device, "Approve", "")} ${btn("deny", l, p.device, "Deny", "alt")}</span>
+        </div>`;
+      }).join("")}
     </div>`; }).join("");
   } catch (e) {}
 }
