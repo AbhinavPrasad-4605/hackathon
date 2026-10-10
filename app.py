@@ -22,6 +22,15 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 # ---------- Gemini AI threat detection ----------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+if not GEMINI_API_KEY and os.path.exists(".env"):
+    try:
+        with open(".env", "r", encoding="utf-8") as _f:
+            for _line in _f:
+                if _line.strip().startswith("GEMINI_API_KEY="):
+                    GEMINI_API_KEY = _line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    except Exception:
+        pass
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ---------- Developer console is private-network only ----------
@@ -165,12 +174,12 @@ def assess(lic):
     refused = sum(1 for a in acts if a.get("status") in ("denied", "full", "flood", "badtoken"))
     denied = lic.get("denied_count", 0) + len(lic.get("denied", set()))
     if refused:
-        rule += min(45, 5 * refused)
+        rule += min(30, 2 * refused)
         reasons.append(f"{refused} activation attempts were refused")
     if denied:
-        rule += min(35, 8 * denied)
+        rule += min(25, 4 * denied)
         if not any("denied" in r for r in reasons):
-            reasons.append(f"{denied} device access request(s) were explicitly denied")
+            reasons.append(f"{denied} device access request(s) were denied by owner")
     if speed > 900:
         rule += 25
         reasons.append(f"Impossible travel: about {int(speed):,} km/h between two activations")
@@ -289,9 +298,17 @@ def pending_assess(lic):
         if unseen_country:
             rule += 10
             reasons.append("Country doesn't match this license's approved devices")
+        # Flagged device intelligence: check if this device was previously caught by a canary honeypot trap
+        is_flagged = device in FLAGGED_ADVERSARY_DEVICES
+        if is_flagged:
+            rule = max(rule, 95)
+            reasons.insert(0, "CRITICAL: This device was previously caught tripping an active canary honeypot trap")
         ml = int(np.clip((0.06 - PENDING_MODEL.decision_function([f])[0]) / 0.18 * 100, 0, 100))
         risk = min(100, max(rule, ml))
+        if is_flagged:
+            risk = max(risk, 95)
         out[device] = {"risk": risk, "verdict": "green" if risk < 30 else "yellow" if risk < 70 else "red",
+                       "flagged_adversary": is_flagged,
                        "reasons": reasons or (["Usage pattern is unusual compared with a normal new device"] if ml >= 50 else [])}
     return out
 
@@ -310,6 +327,7 @@ GEMINI_BLOCK_LOG = []
 # triggers synthetic license poisoning, and blacklists their device cluster.
 CANARY_TRAPS = {}
 HONEYPOT_TELEMETRY = []
+FLAGGED_ADVERSARY_DEVICES = set()  # Cleaned device names flagged by canary traps
 
 
 def is_canary_key(key: str):
@@ -358,7 +376,7 @@ class OverrideReq(BaseModel):
     action: str       # "ALLOW" | "BLOCK" | "CLEAR"
 
 
-def gemini_threat_analysis(lic, device, country, ip, key_status, token_provided):
+def gemini_threat_analysis(lic, device, country, ip, key_status, token_provided, new_token_issued=False):
     if gemini_client is None:
         return {"threat_level": "LOW", "action": "ALLOW", "confidence": 1.0, "attack_type": "none", "reasoning": "Gemini AI not configured", "recommendation": "None"}
     
@@ -376,6 +394,7 @@ def gemini_threat_analysis(lic, device, country, ip, key_status, token_provided)
                 "ip": ip,
                 "key_status": key_status,
                 "token_provided": token_provided,
+                "new_token_issued": new_token_issued,
                 "ip_failed_attempts": fails
             },
             "license": {
@@ -413,12 +432,12 @@ You MUST respond with EXACTLY this JSON format and nothing else:
 }
 
 Rules:
-- If the request is from the first device binding to a license and everything looks normal, threat is LOW and action is ALLOW.
-- If the device is already trusted and presents a valid token, threat is LOW and action is ALLOW.
+- If new_token_issued is true (the device is binding as the first device or checking in for the first time after owner approval), threat is LOW and action is ALLOW.
+- If the device is already trusted and presents a valid token (key_status is "ok"), threat is LOW and action is ALLOW.
+- If a known device name is used without the correct token (key_status is "badtoken"), this is device impersonation, threat is CRITICAL, action is BLOCK.
 - If there are multiple countries in short time spans (impossible travel), threat is HIGH or CRITICAL, action is BLOCK.
 - If the same IP has many failed attempts, threat is HIGH, action is BLOCK.
 - If device names look auto-generated and arrive in rapid bursts, this is approval flooding, threat is CRITICAL, action is BLOCK.
-- If a known device name is used without the correct token, this is device impersonation, threat is CRITICAL, action is BLOCK.
 - If the license has activations from many devices beyond its limit, threat is HIGH, action is BLOCK.
 - If a device is pending approval, threat is MEDIUM at most, action is WARN (let the owner decide).
 - When in doubt, err on the side of security.
@@ -426,7 +445,7 @@ Rules:
 """
         
         response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.8-flash",
             contents=prompt + "\n\nContext:\n" + json.dumps(context)
         )
         
@@ -503,12 +522,14 @@ def api_verify(r: VerifyReq, req: Request):
     if canary:
         canary["triggered_count"] += 1
         canary["trapped_ips"].add(ip)
+        dev_name = clean_device(r.device)
+        FLAGGED_ADVERSARY_DEVICES.add(dev_name)
         telemetry = {
             "ts": time.time(),
             "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "key": r.key.strip(),
             "label": canary["label"],
-            "device": clean_device(r.device),
+            "device": dev_name,
             "country": clean_country(r.country),
             "ip": ip,
             "signature": f"TRAP-{uuid.uuid4().hex[:6].upper()}",
@@ -518,7 +539,7 @@ def api_verify(r: VerifyReq, req: Request):
         if len(HONEYPOT_TELEMETRY) > 100:
             HONEYPOT_TELEMETRY.pop(0)
         FAILS.setdefault(ip, []).append(time.time())
-        print(f"[CYBER DECEPTION] Honeypot Canary triggered: Key=...{r.key.strip()[-5:]} | Label={canary['label']} | IP={ip} | Device={clean_device(r.device)} | Signature={telemetry['signature']}")
+        print(f"[CYBER DECEPTION] Honeypot Canary triggered: Key=...{r.key.strip()[-5:]} | Label={canary['label']} | IP={ip} | Device={dev_name} | Signature={telemetry['signature']}")
         return {
             "verdict": "red",
             "risk": 100,
@@ -548,7 +569,7 @@ def api_verify(r: VerifyReq, req: Request):
     status, new_token = add_act(lic, clean_device(r.device), clean_country(r.country), r.token, ip)
     res = view(lic, {"allowed": status == "ok", "status": status})
     
-    gemini_result = gemini_threat_analysis(lic, clean_device(r.device), clean_country(r.country), ip, status, bool(r.token))
+    gemini_result = gemini_threat_analysis(lic, clean_device(r.device), clean_country(r.country), ip, status, bool(r.token), new_token_issued=bool(new_token))
 
     # --- Manual override check (admin always wins over AI) ---
     override_key = f"{r.key.strip().upper()}:{clean_device(r.device)}"
